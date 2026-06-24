@@ -1,0 +1,138 @@
+graph TD
+    subgraph API["api/ — HTTP 接口层"]
+        routes["routes.rs<br/>28+ 个 REST 路由"]
+        middleware["middleware.rs<br/>认证 + ABAC + TOTP"]
+        mtls["mtls.rs<br/>mTLS Acceptor"]
+        error["error.rs<br/>统一错误响应"]
+    end
+
+    subgraph AuthMod["auth/ — 认证"]
+        session["session.rs<br/>会话管理"]
+        totp["totp.rs<br/>TOTP 双因子 + 恢复码"]
+    end
+
+    subgraph Key["key/ — 密钥管理"]
+        types["types.rs<br/>Key/KeyVersion/KeyState"]
+        manager["manager.rs<br/>生命周期控制"]
+        store["store.rs<br/>KeyStore trait + Sqlite"]
+        dependency["dependency.rs<br/>密钥依赖关系"]
+    end
+
+    subgraph Crypto["crypto/ — 国密引擎"]
+        traits["traits.rs<br/>SymmetricCrypto/HashEngine/SignEngine"]
+        sm4["sm4_engine.rs<br/>SM4-GCM 认证加密"]
+        sm3["sm3_engine.rs<br/>SM3 哈希 + HMAC"]
+        sm2["sm2_engine.rs<br/>SM2 签名/验签 + 密钥对"]
+        envelope["envelope.rs<br/>信封加密 + 数据密钥"]
+        secure_mem["secure_mem.rs<br/>安全内存零化"]
+    end
+
+    subgraph HSM["hsm/ — 硬件抽象"]
+        traits_hsm["traits.rs<br/>KekProvider 接口"]
+        sw_provider["software_provider.rs<br/>SM3-HMAC-KDF"]
+        p11_provider["pkcs11_provider.rs<br/>PKCS#11 HSM"]
+        sdf_provider["sdf_provider.rs<br/>SDF 兼容层"]
+    end
+
+    subgraph Policy["policy/ — 策略引擎"]
+        types_pol["types.rs<br/>PolicyDocument/Statement"]
+        engine_pol["engine.rs<br/>ABAC 评估"]
+        label["label.rs<br/>MAC 安全标记"]
+        roles_pol["roles.rs<br/>三权分立 RBAC"]
+    end
+
+    subgraph Audit["audit/ — 审计日志"]
+        logger["logger.rs<br/>SM3 链 + SM2 签名"]
+        store_audit["store.rs<br/>内存存储"]
+        sqlite_audit["sqlite_store.rs<br/>SQLite 审计持久化"]
+    end
+
+    subgraph Monitor["monitor/ — 入侵检测"]
+        detector["detector.rs<br/>入侵检测器"]
+        rules_mon["rules.rs<br/>规则引擎"]
+        blocklist["blocklist.rs<br/>累进封禁"]
+        metrics["metrics.rs<br/>Prometheus 指标"]
+        syslog_m["syslog.rs<br/>Syslog 审计"]
+    end
+
+    subgraph Trust["trust/ — 可信验证"]
+        trust_mod["mod.rs<br/>二进制+配置 SM3 校验"]
+        tpm_sw["tpm/software_tpm.rs<br/>软件 TPM 模拟"]
+        tpm_hw["tpm/tss_tpm.rs<br/>TPM 2.0 硬件"]
+    end
+
+    subgraph Approval["approval/ — 双人复核"]
+        approval_mod["mod.rs<br/>审批请求 + SQLite 存储"]
+    end
+
+    subgraph Backup["backup/ — 备份恢复"]
+        backup_mod["mod.rs<br/>密钥/种子/审计导出导入"]
+    end
+
+    subgraph Evidence["evidence/ — 合规证据"]
+        evidence_mod["mod.rs<br/>合规报告 + 证据包"]
+    end
+
+    subgraph Store["store/ — 持久化"]
+        repo["repository.rs<br/>KeyRepo + AuditRepo"]
+        migrations["migrations.rs<br/>SQLite/PostgreSQL DDL"]
+    end
+
+    subgraph Config["config/ — 配置"]
+        config_mod["config.rs<br/>TOML + CLI 参数"]
+    end
+
+    routes --> manager
+    routes --> envelope
+    routes --> logger
+    routes --> engine_pol
+    routes --> session
+    routes --> totp
+    routes --> backup_mod
+    routes --> evidence_mod
+    routes --> approval_mod
+    routes --> blocklist
+    middleware --> engine_pol
+    middleware --> session
+    middleware --> totp
+    manager --> store
+    manager --> sm3
+    manager --> dependency
+    envelope --> sm4
+    envelope --> traits_hsm
+    sm2 --> logger
+    sm4 --> traits
+    sm3 --> traits
+    sm2 --> traits
+    traits_hsm --> sw_provider
+    traits_hsm --> p11_provider
+    traits_hsm --> sdf_provider
+    sw_provider --> sm4
+    sw_provider --> sm3
+    logger --> sm3
+    logger --> sm2
+    logger --> sqlite_audit
+    store_audit --> sm3
+    detector --> logger
+    detector --> rules_mon
+    detector --> blocklist
+    trust_mod --> tpm_sw
+    trust_mod --> tpm_hw
+    store --> repo
+    repo --> types
+    config_mod --> error
+
+    style API fill:#1a1a2e,stroke:#4ecca3,color:#eee
+    style AuthMod fill:#1a1a2e,stroke:#4ecca3,color:#eee
+    style Key fill:#16213e,stroke:#0f3460,color:#eee
+    style Crypto fill:#0f3460,stroke:#e94560,color:#eee
+    style HSM fill:#533483,stroke:#e94560,color:#eee
+    style Policy fill:#2d2d2d,stroke:#4ecca3,color:#eee
+    style Audit fill:#1a1a2e,stroke:#e94560,color:#eee
+    style Monitor fill:#2d2d2d,stroke:#e94560,color:#eee
+    style Trust fill:#533483,stroke:#4ecca3,color:#eee
+    style Approval fill:#16213e,stroke:#4ecca3,color:#eee
+    style Backup fill:#0f3460,stroke:#4ecca3,color:#eee
+    style Evidence fill:#1a1a2e,stroke:#e94560,color:#eee
+    style Store fill:#16213e,stroke:#4ecca3,color:#eee
+    style Config fill:#0f3460,stroke:#4ecca3,color:#eee

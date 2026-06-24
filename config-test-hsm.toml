@@ -1,0 +1,42 @@
+[server]
+host = "127.0.0.1"
+port = 8443
+workers = 4
+session_ttl_secs = 3600
+
+[database]
+url = "sqlite://data/test-kms.db?mode=rwc"
+max_connections = 10
+run_migrations = true
+
+[crypto]
+kek_path = "data/test-master.key"
+key_rotation_days = 365
+max_key_versions = 10
+
+[audit]
+log_path = "data/test-audit.log"
+retention_days = 365
+enable_chain = true
+enable_signing = false
+
+[hsm]
+mode = "pkcs11"
+pkcs11_module_path = "/usr/lib/softhsm/libsofthsm2.so"
+pkcs11_slot_id = 1011352824
+pkcs11_pin = "1234"
+software_master_seed = "test-seed-for-softHSM-test-12345"
+
+[policy]
+enable_rbac = true
+enforce_https = false
+
+[auth]
+totp_issuer = "KMS-Test"
+admin_token = "test-admin-token"
+
+[trust]
+
+[tpm]
+mode = "software"
+enable_startup_measurement = false

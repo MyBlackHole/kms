@@ -1,0 +1,95 @@
+graph TB
+    subgraph 用户层["👤 用户层"]
+        Admin["管理员 CLI/Web"]
+        App1["应用 A (Go)"]
+        App2["应用 B (Python)"]
+        App3["应用 C (Rust)"]
+    end
+
+    subgraph 网络边界["🔒 网络边界 (TLS 1.3 / mTLS)"]
+        LB["反向代理 / 负载均衡"]
+    end
+
+    subgraph KMS["🇨🇳 国密 KMS 服务"]
+        API["RESTful API<br/>(Axum - HTTP/1.1)"]
+        Auth["认证/鉴权中间件<br/>(Bearer + TOTP + Session)"]
+        Policy["策略引擎<br/>(ABAC + MAC + RBAC)"]
+        Approval["双人复核<br/>(ApprovalManager)"]
+
+        subgraph Core["核心业务"]
+            KM["密钥管理器<br/>(KeyManager)"]
+            EE["信封加密<br/>(EnvelopeEncryption)"]
+            AL["审计日志器<br/>(AuditLogger)"]
+            ID["入侵检测器<br/>(IntrusionDetector)"]
+        end
+
+        subgraph Crypto["密码引擎"]
+            SM4["SM4-GCM<br/>认证加密"]
+            SM3["SM3 哈希 + HMAC"]
+            SM2["SM2 签名/验签"]
+        end
+
+        subgraph HSM_LAYER["密码硬件抽象层"]
+            KEK_SW["SoftwareKEKProvider<br/>软件 KEK"]
+            KEK_P11["Pkcs11KEKProvider<br/>PKCS#11 HSM"]
+            KEK_SDF["SDFKEKProvider<br/>(国密 SDF 接口)"]
+        end
+
+        subgraph Trust_Module["可信度量"]
+            TPM_SW["SoftwareTpm<br/>TPM 软件模拟"]
+            TPM_HW["TssTpm<br/>TPM 2.0 硬件"]
+        end
+    end
+
+    subgraph 存储层["🗄️ 持久化层"]
+        SQLite[("SQLite<br/>(开发/轻量)")]
+        PG[("PostgreSQL<br/>(生产)")]
+        KM_STORE[("密钥材料<br/>加密存储")]
+        AUDIT_STORE[("审计日志<br/>独立存储")]
+    end
+
+    subgraph 密码硬件["🔐 密码硬件"]
+        HSM_P11[("PKCS#11 HSM")]
+        HSM_GM[("国密 HSM<br/>三未信安/江南天安")]
+        SOFT_HSM[("软件模拟<br/>(开发测试)")]
+        TPM_CHIP[("TPM 2.0 芯片")]
+    end
+
+    Admin -->|REST API| LB
+    App1 -->|HTTPS| LB
+    App2 -->|HTTPS| LB
+    App3 -->|HTTPS| LB
+    LB --> API
+    API --> Auth
+    Auth --> Policy
+    Policy --> Approval
+    Approval --> KM
+    KM --> EE
+    KM --> AL
+    KM --> ID
+    ID --> AL
+    EE --> KEK_SW
+    EE --> KEK_P11
+    EE --> KEK_SDF
+    KEK_SW --> SOFT_HSM
+    KEK_P11 --> HSM_P11
+    KEK_SDF --> HSM_GM
+    KM --> KM_STORE
+    KM_STORE --> SQLite
+    KM_STORE --> PG
+    AL --> AUDIT_STORE
+    AUDIT_STORE --> SQLite
+    AL --> PG
+    SM4 --> EE
+    SM3 --> AL
+    SM2 --> AL
+    TPM_SW --> TPM_CHIP
+    TPM_HW --> TPM_CHIP
+
+    style KMS fill:#1a1a2e,stroke:#e94560,color:#eee
+    style Core fill:#16213e,stroke:#0f3460,color:#eee
+    style Crypto fill:#0f3460,stroke:#e94560,color:#eee
+    style HSM_LAYER fill:#533483,stroke:#e94560,color:#eee
+    style Trust_Module fill:#2d2d2d,stroke:#4ecca3,color:#eee
+    style 密码硬件 fill:#2d2d2d,stroke:#e94560,color:#eee
+    style 存储层 fill:#1a1a2e,stroke:#4ecca3,color:#eee

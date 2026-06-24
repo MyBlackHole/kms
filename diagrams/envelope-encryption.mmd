@@ -1,0 +1,40 @@
+sequenceDiagram
+    participant App as 应用
+    participant KMS as KMS 服务
+    participant KEK as KEK Provider
+    participant RNG as 随机数源
+
+    Note over App,KMS: 生成数据密钥 (GenerateDataKey)
+
+    App->>KMS: POST /keys/{id}/datakey
+    activate KMS
+    KMS->>KEK: unwrap_key(key_id, version)
+    activate KEK
+    KEK-->>KMS: 明文 KEK (16 bytes)
+    deactivate KEK
+    KMS->>RNG: 生成 32 字节 DEK
+    activate RNG
+    RNG-->>KMS: 随机 DEK
+    deactivate RNG
+    KMS->>KMS: SM4-GCM 加密 DEK<br/>key=KEK, aad="key_id:version"
+    KMS-->>App: 密文 DEK (nonce || ct || tag)
+    deactivate KMS
+
+    Note over App,KMS: 使用 DEK 加密数据
+
+    App->>App: SM4-GCM 加密明文<br/>key=DEK, aad=上下文
+    App-->>用户: 密文 + 密文 DEK
+
+    Note over App,KMS: 解密数据
+
+    App->>KMS: POST /keys/{id}/decrypt<br/>{密文 DEK, key_id, version}
+    activate KMS
+    KMS->>KEK: unwrap_key(key_id, version)
+    activate KEK
+    KEK-->>KMS: 明文 KEK
+    deactivate KEK
+    KMS->>KMS: SM4-GCM 解密 DEK<br/>key=KEK
+    KMS-->>App: 明文 DEK
+    deactivate KMS
+    App->>App: SM4-GCM 解密密文<br/>key=DEK
+    App-->>用户: 明文

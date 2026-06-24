@@ -1,0 +1,33 @@
+graph LR
+    subgraph Chain["审计日志哈希链"]
+        direction LR
+        EV1["Event 1<br/>(ts=1000)"]
+        EV2["Event 2<br/>(ts=1001)"]
+        EV3["Event 3<br/>(ts=1002)"]
+        EV4["Event 4<br/>(ts=1003)"]
+
+        H1["SM3(Canonical1)<br/>= 0xa1b2..."]
+        H2["SM3(Canonical2)<br/>= 0xc3d4..."]
+        H3["SM3(Canonical3)<br/>= 0xe5f6..."]
+        H4["SM3(Canonical4)<br/>= 0x0708..."]
+    end
+
+    subgraph Canonical["规范字节串构成"]
+        CAN_FMT["timestamp | event_type<br/>| subject | action<br/>| resource | result<br/>| prev_hash | hash<br/>| detail"]
+    end
+
+    EV1 -->|prev_hash=NULL| H1
+    H1 -->|prev_hash=0xa1b2...| EV2
+    EV2 --> H2
+    H2 -->|prev_hash=0xc3d4...| EV3
+    EV3 --> H3
+    H3 -->|prev_hash=0xe5f6...| EV4
+    EV4 --> H4
+
+    EV1 -.->|SM2 签名| SIG1["Sig(Canonical1)"]
+    EV2 -.->|SM2 签名| SIG2["Sig(Canonical2)"]
+    EV3 -.->|SM2 签名| SIG3["Sig(Canonical3)"]
+    EV4 -.->|SM2 签名| SIG4["Sig(Canonical4)"]
+
+    style Chain fill:#0f3460,stroke:#4ecca3,color:#eee
+    style Canonical fill:#16213e,stroke:#e94560,color:#eee

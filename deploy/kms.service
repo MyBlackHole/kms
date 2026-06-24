@@ -1,0 +1,31 @@
+[Unit]
+Description=KMS - 国密合规密钥管理系统
+Documentation=https://github.com/MyBlackHole/kms
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kms
+Group=kms
+WorkingDirectory=/opt/kms
+Environment=RUST_LOG=info
+ExecStart=/opt/kms/kms-server --config /opt/kms/config.toml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+StartLimitBurst=3
+StartLimitInterval=60s
+TimeoutStopSec=30
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+# 安全加固
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+ReadWritePaths=/opt/kms/data
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,40 @@
+stateDiagram-v2
+    [*] --> Enabled: 创建密钥 (create_key)
+
+    Enabled --> Disabled: 禁用 (disable_key)
+    Enabled --> Enabled: 轮换 (rotate_key)
+    Enabled --> PendingArchive: 归档 (archive_key)
+
+    Disabled --> Enabled: 启用 (enable_key)
+    Disabled --> PendingArchive: 归档 (archive_key)
+    Disabled --> Destroyed: 销毁 (destroy_key)
+
+    PendingArchive --> Enabled: 启用 (enable_key)
+    PendingArchive --> Destroyed: 安全销毁 (destroy_key)
+
+    Destroyed --> [*]: 记录保留
+
+    note right of Enabled
+        CanEncrypt = true
+        CanDecrypt = true
+        密钥版本递增
+    end note
+
+    note right of Disabled
+        CanEncrypt = false
+        CanDecrypt = true
+        不能加密新数据
+        但可解密历史数据
+    end note
+
+    note right of PendingArchive
+        等待安全删除窗口期
+        可回滚
+    end note
+
+    note right of Destroyed
+        CanEncrypt = false
+        CanDecrypt = false
+        密钥材料已不可恢复
+        操作日志保留
+    end note
