@@ -25,6 +25,42 @@ fn resolve_software_seed(cfg: &config::Config) -> Option<String> {
     })
 }
 
+/// 打印安全启动摘要
+fn print_security_startup_summary(cfg: &config::Config, profile: config::SecurityProfile) {
+    let level = match cfg.auth.security_level {
+        config::SecurityLevel::Level3 => "Level3 (等保三级)",
+        config::SecurityLevel::Level4 => {
+            if profile.is_production() {
+                "Level4 (等保四级) — 生产画像 — 封闭安全策略"
+            } else {
+                "Level4 (等保四级) — 开发/CI 画像 — 非生产模式"
+            }
+        }
+    };
+    tracing::info!(
+        target: "security",
+        "=== 安全启动摘要 ==="
+    );
+    tracing::info!(target: "security", "安全等级: {}", level);
+    tracing::info!(target: "security", "运行画像: {}", profile.as_str());
+    tracing::info!(target: "security", "HSM 模式: {}", cfg.hsm.mode);
+    tracing::info!(target: "security", "审计链: {}", cfg.audit.enable_chain);
+    tracing::info!(target: "security", "审计签名: {}", cfg.audit.enable_signing);
+    tracing::info!(target: "security", "抗抵赖: {}", cfg.auth.anti_repudiation);
+    if cfg.auth.admin_token.is_some() {
+        tracing::info!(target: "security", "admin_token: 已配置");
+    } else {
+        tracing::warn!(target: "security", "admin_token: 未配置 — 仅限开发/测试用途");
+    }
+    if cfg.auth.security_level == config::SecurityLevel::Level3 && !profile.is_production() {
+        tracing::warn!(
+            target: "security",
+            "⚠ 非四级生产模式 — 宽松 Bearer 认证仅在 Level3/Dev Profile 下允许"
+        );
+    }
+    tracing::info!(target: "security", "=== 安全启动摘要结束 ===");
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -42,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
         println!("{}", hash);
         return Ok(());
     }
-    let cfg = config::Config::load(&cli.config).unwrap_or_else(|_| {
+    let mut cfg = config::Config::load(&cli.config).unwrap_or_else(|_| {
         tracing::warn!("无法加载配置文件，使用默认配置");
         config::Config {
             server: config::ServerConfig {
@@ -98,9 +134,31 @@ async fn main() -> anyhow::Result<()> {
                 admin_token: None,
                 security_level: config::SecurityLevel::Level3,
                 anti_repudiation: false,
+                sensitive_operations: config::AuthConfig::default().sensitive_operations,
             },
+            profile: config::SecurityProfile::default(),
+            level4: config::Level4Config::default(),
         }
     });
+
+    // 应用 CLI --profile 覆盖
+    if let Some(p) = cli.profile {
+        cfg.profile = p;
+    }
+
+    let effective_profile = cfg.effective_profile();
+
+    // Level4 启动自检
+    if cfg.auth.security_level == config::SecurityLevel::Level4 && effective_profile.is_production()
+    {
+        tracing::info!("Level4 生产画像 — 执行启动自检");
+        // HSM 必选检查已经由 validate() 完成
+        // 输出醒目标记
+        tracing::warn!("⚠ 当前为四级等保生产模式 — 所有安全控制已强制启用");
+    }
+
+    // 启动安全摘要
+    print_security_startup_summary(&cfg, effective_profile);
 
     // 可信验证：检查二进制和配置文件完整性
     if let Some(ref expected_hash) = cfg.trust.expected_binary_hash {
@@ -294,12 +352,29 @@ async fn main() -> anyhow::Result<()> {
 
     let policy_engine = std::sync::Arc::new(policy::engine::PolicyEngine::new());
     let envelope = crypto::envelope::EnvelopeEncryption::new();
-    let session_manager = std::sync::Arc::new(auth::session::SessionManager::new(
-        cfg.server.session_ttl_secs,
-    ));
+
+    // Level4 使用 level4.session_timeout_seconds，level3 使用 server.session_ttl_secs
+    let effective_session_ttl = if cfg.auth.security_level == config::SecurityLevel::Level4 {
+        cfg.level4.session_timeout_seconds
+    } else {
+        cfg.server.session_ttl_secs
+    };
+    let session_manager =
+        std::sync::Arc::new(auth::session::SessionManager::new(effective_session_ttl));
     let totp_secret_issuer = cfg.auth.totp_issuer.clone();
     let token_store = auth::token::TokenStore::new(pool.clone());
     let auth = std::sync::Arc::new(api::middleware::Auth::new(cfg.auth.admin_token.clone()));
+
+    // Level4 二次鉴权管理器
+    let reauth_manager = if cfg.auth.security_level == config::SecurityLevel::Level4 {
+        Some(std::sync::Arc::new(auth::reauth::ReauthManager::new(
+            cfg.auth.sensitive_operations.clone(),
+            cfg.level4.sensitive_operation_reauth_ttl_seconds,
+            effective_profile,
+        )))
+    } else {
+        None
+    };
 
     let approval_store = kms::approval::SqliteApprovalStore::new(pool.clone());
     let dep_store = kms::key::dependency::SqliteDependencyStore::new(pool.clone());
@@ -322,6 +397,10 @@ async fn main() -> anyhow::Result<()> {
         totp_attempts: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         security_level: cfg.auth.security_level,
         anti_repudiation: cfg.auth.anti_repudiation,
+        // Level4 配置分享
+        security_profile: effective_profile,
+        level4_config: cfg.level4.clone(),
+        reauth_manager: reauth_manager.clone(),
     });
 
     let mw_state = api::middleware::AuthMiddlewareState {
@@ -335,6 +414,9 @@ async fn main() -> anyhow::Result<()> {
             .as_ref()
             .and_then(|tls| tls.client_ca_path.as_ref())
             .is_some(),
+        security_level: cfg.auth.security_level,
+        reauth_manager,
+        sensitive_operations: cfg.auth.sensitive_operations.clone(),
     };
 
     let app = api::routes::build_router(app_state)

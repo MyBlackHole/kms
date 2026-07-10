@@ -271,6 +271,52 @@ pub async fn validate_token(&self, token: &str, token_store: &TokenStore) -> boo
 
 ---
 
+## 附录：等保四级身份鉴别增强
+
+### 1. 二次鉴权（Reauth）流程
+
+Level4 模式下，敏感操作（密钥删除、导出、策略变更等）在完成基础 Token 认证后，还需要进行 TOTP 二次鉴权：
+
+```
+[请求到达] → [Token 鉴权] → [敏感 API?] ─是→ [X-Reauth-TOTP 头验证]
+                     │                        │
+                    否                        Ok(true)
+                     │                        │
+                     ▼                        ▼
+                [放行]                    [标记 session 二次鉴权]
+```
+
+### 2. 关键签名
+
+```rust
+// src/auth/reauth.rs
+pub struct ReauthManager { sensitive_operations: Vec<String>, reauth_ttl: Duration, profile: SecurityProfile }
+
+impl ReauthManager {
+    pub fn requires_reauth(&self, action: &str) -> bool;
+    pub fn is_reauth_valid(&self, verified_at: Option<Instant>) -> bool;
+    pub fn verify_totp_reauth(&self, totp_code: &str, secret: &str, issuer: &str, username: &str) -> Result<(), ReauthError>;
+}
+```
+
+### 3. 验证规则
+
+- **必须实际验证 TOTP 码值**：中间件不能只检查 `X-Reauth-TOTP` 头是否存在，必须调用 `TotpManager::validate_user_code()` 验证
+- TOTP 密钥在初始日志时存储到 `SessionInfo.totp_secret`，供二次鉴权使用
+- 二次鉴权通过后在 session 中记录 `second_factor_verified_at`，TTL 内不再重复挑战
+
+### 4. Session 防劫持
+
+```rust
+// src/auth/session.rs:SessionInfo
+pub client_ip: Option<String>,             // 创建会话时记录
+pub fn check_session_hijack(&self, current_ip: Option<&str>) -> bool;
+```
+
+Level4 下每个请求通过 `X-Forwarded-For` 检测 IP 变化，IP 不匹配视为潜在劫持。
+
+---
+
 ## 附录：手动测试验证
 
 ### 单元测试结果

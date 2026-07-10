@@ -317,6 +317,10 @@ mod tests {
             action: "encrypt".into(),
             resource: "key:test".into(),
             request_time: chrono::Utc::now(),
+            session_id: None,
+            second_factor_verified: true,
+            mtls_authenticated: false,
+            subject_label: None,
         }
     }
 

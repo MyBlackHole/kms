@@ -184,6 +184,8 @@ async fn handle_logout(client: &KmsClient, session_id: &str) -> crate::Result<()
         {"tag": "UniqueIdentifier", "type": "TextString", "value": session_id}
     ]);
     client.kmip_request("x-Logout", Some(payload)).await?;
+    // 清除本地凭据文件
+    KmsClient::clear_credential_file();
     println!("已登出");
     Ok(())
 }

@@ -13,6 +13,7 @@ pub mod monitor;
 pub mod policy;
 pub mod store;
 pub mod trust;
+pub mod validation;
 
 pub type Result<T> = std::result::Result<T, Error>;
 

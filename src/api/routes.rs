@@ -28,6 +28,12 @@ pub struct AppState {
     pub security_level: crate::config::SecurityLevel,
     /// 抗抵赖模块开关
     pub anti_repudiation: bool,
+    /// 运行安全画像
+    pub security_profile: crate::config::SecurityProfile,
+    /// 等保四级详细配置
+    pub level4_config: crate::config::Level4Config,
+    /// 二次鉴权管理器
+    pub reauth_manager: Option<Arc<crate::auth::reauth::ReauthManager>>,
 }
 
 pub fn build_router(state: Arc<AppState>) -> Router {

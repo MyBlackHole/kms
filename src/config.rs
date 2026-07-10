@@ -1,6 +1,47 @@
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::str::FromStr;
+
+/// 运行画像
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SecurityProfile {
+    /// 生产模式（等保四级强约束）
+    #[default]
+    Production,
+    /// 开发模式
+    Dev,
+    /// CI 模式
+    Ci,
+}
+
+impl FromStr for SecurityProfile {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "production" | "prod" => Ok(SecurityProfile::Production),
+            "dev" | "development" => Ok(SecurityProfile::Dev),
+            "ci" => Ok(SecurityProfile::Ci),
+            _ => Err(format!("未知的运行画像: {} (可选: production, dev, ci)", s)),
+        }
+    }
+}
+
+impl SecurityProfile {
+    pub fn is_production(&self) -> bool {
+        matches!(self, SecurityProfile::Production)
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SecurityProfile::Production => "production",
+            SecurityProfile::Dev => "dev",
+            SecurityProfile::Ci => "ci",
+        }
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "kms-server", about = "国密合规密钥管理系统")]
@@ -16,6 +57,9 @@ pub struct Cli {
     /// 管理子命令
     #[command(subcommand)]
     pub command: Option<CliCommand>,
+    /// 运行画像（覆盖配置文件中的 profile 设置）
+    #[arg(long)]
+    pub profile: Option<SecurityProfile>,
 }
 
 #[derive(Debug, Parser)]
@@ -64,6 +108,12 @@ pub struct Config {
     pub tpm: TpmConfig,
     #[serde(default)]
     pub cluster: ClusterConfig,
+    /// 运行画像（默认 production）
+    #[serde(default)]
+    pub profile: SecurityProfile,
+    /// 等保四级详细配置（仅在 security_level = "level4" 时有效）
+    #[serde(default)]
+    pub level4: Level4Config,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
@@ -72,6 +122,58 @@ pub enum SecurityLevel {
     #[default]
     Level3,
     Level4,
+}
+
+/// 等保四级详细配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Level4Config {
+    /// 服务端会话超时（秒，默认 600）
+    #[serde(default = "default_session_timeout")]
+    pub session_timeout_seconds: u64,
+    /// 敏感操作二次鉴权 TTL（秒，默认 300）
+    #[serde(default = "default_reauth_ttl")]
+    pub sensitive_operation_reauth_ttl_seconds: u64,
+    /// 审计管理中心上报端点
+    #[serde(default)]
+    pub audit_management_center_endpoint: Option<String>,
+    /// HSM PKCS#11 模块路径
+    #[serde(default)]
+    pub hsm_pkcs11_module: Option<String>,
+    /// HSM Slot ID
+    #[serde(default = "default_hsm_slot")]
+    pub hsm_slot_id: u64,
+    /// 生产环境 HSM 是否必须（默认 true）
+    #[serde(default = "default_true")]
+    pub hsm_required_in_production: bool,
+    /// 开发/CI 是否允许软件 provider 模拟 HSM
+    #[serde(default = "default_true")]
+    pub hsm_allow_software_provider_in_dev: bool,
+    /// mTLS 是否对管理 API 必须
+    #[serde(default)]
+    pub mtls_required_for_management_api: bool,
+    /// 可信验证上报端点
+    #[serde(default)]
+    pub trusted_verification_report_endpoint: Option<String>,
+    /// 安全管理员配置审计上报地址的权限控制
+    #[serde(default = "default_true")]
+    pub audit_reporting_requires_security_admin: bool,
+}
+
+impl Default for Level4Config {
+    fn default() -> Self {
+        Self {
+            session_timeout_seconds: default_session_timeout(),
+            sensitive_operation_reauth_ttl_seconds: default_reauth_ttl(),
+            audit_management_center_endpoint: None,
+            hsm_pkcs11_module: None,
+            hsm_slot_id: default_hsm_slot(),
+            hsm_required_in_production: true,
+            hsm_allow_software_provider_in_dev: true,
+            mtls_required_for_management_api: false,
+            trusted_verification_report_endpoint: None,
+            audit_reporting_requires_security_admin: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +186,9 @@ pub struct AuthConfig {
     pub security_level: SecurityLevel,
     #[serde(default)]
     pub anti_repudiation: bool,
+    /// 敏感操作列表（需要二次鉴权的操作，逗号分隔）
+    #[serde(default = "default_sensitive_ops")]
+    pub sensitive_operations: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -278,6 +383,7 @@ impl Default for AuthConfig {
             admin_token: None,
             security_level: SecurityLevel::Level3,
             anti_repudiation: false,
+            sensitive_operations: default_sensitive_ops(),
         }
     }
 }
@@ -361,6 +467,30 @@ fn default_totp_issuer() -> String {
     "KMS".into()
 }
 
+fn default_session_timeout() -> u64 {
+    600
+}
+
+fn default_reauth_ttl() -> u64 {
+    300
+}
+
+fn default_hsm_slot() -> u64 {
+    0
+}
+
+fn default_sensitive_ops() -> Vec<String> {
+    vec![
+        "DESTROY".into(),
+        "DISABLE".into(),
+        "ROTATE".into(),
+        "EXPORT".into(),
+        "SET_LABEL".into(),
+        "ATTACH_POLICY".into(),
+        "SET_CONFIG".into(),
+    ]
+}
+
 impl Config {
     pub fn load(path: &PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path)
@@ -374,13 +504,46 @@ impl Config {
     pub fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
         // Level4 模式强制要求配置 admin_token
         if self.auth.security_level == SecurityLevel::Level4 && self.auth.admin_token.is_none() {
-            return Err("Level4 mode requires admin_token to be configured".into());
+            return Err("Level4 (等保四级) 模式必须配置 admin_token".into());
         }
-        // Level4 模式审计不可关闭
+        // Level4 模式审计签名不可关闭
         if self.auth.security_level == SecurityLevel::Level4 && !self.audit.enable_signing {
-            return Err("Level4 mode requires audit signing to be enabled".into());
+            return Err("Level4 (等保四级) 模式必须启用审计签名 (enable_signing = true)".into());
+        }
+        // Level4 模式审计哈希链不可关闭
+        if self.auth.security_level == SecurityLevel::Level4 && !self.audit.enable_chain {
+            return Err("Level4 (等保四级) 模式必须启用审计哈希链 (enable_chain = true)".into());
+        }
+        // Level4 生产画像必须使用 HSM 模式，不能是 software
+        if self.auth.security_level == SecurityLevel::Level4
+            && self.profile.is_production()
+            && self.hsm.mode == "software"
+            && self.level4.hsm_required_in_production
+        {
+            return Err(
+                "Level4 (等保四级) 生产画像必须配置 HSM (hsm.mode = \"pkcs11\" 或 \"sdf\")".into(),
+            );
+        }
+        // Level4 模式必须启用 RBAC
+        if self.auth.security_level == SecurityLevel::Level4 && !self.policy.enable_rbac {
+            return Err("Level4 (等保四级) 模式必须启用 RBAC".into());
+        }
+        // Level4 模式 session_ttl_secs 不能超过 level4.session_timeout_seconds
+        if self.auth.security_level == SecurityLevel::Level4 {
+            let max_session = self.level4.session_timeout_seconds;
+            if self.server.session_ttl_secs > max_session {
+                return Err(format!(
+                    "Level4 (等保四级) 模式 session_ttl_secs ({}) 不能超过 level4.session_timeout_seconds ({})",
+                    self.server.session_ttl_secs, max_session
+                ).into());
+            }
         }
         Ok(())
+    }
+
+    pub fn effective_profile(&self) -> SecurityProfile {
+        // CLI --profile 覆盖配置中的 profile 字段，但这里假设 load 时 profile 已合并
+        self.profile
     }
 
     pub fn default_config() -> String {
@@ -421,6 +584,19 @@ totp_issuer = "KMS"
 [trust]
 # expected_binary_hash = "your-binary-sm3-hash"
 # expected_config_hash = "your-config-sm3-hash"
+
+# 等保四级详细配置（仅在 security_level = "level4" 时有效）
+# [level4]
+# session_timeout_seconds = 600
+# sensitive_operation_reauth_ttl_seconds = 300
+# audit_management_center_endpoint = "https://audit-center.example/events"
+# hsm_pkcs11_module = "/usr/lib/libswsds.so"
+# hsm_slot_id = 0
+# hsm_required_in_production = true
+# hsm_allow_software_provider_in_dev = true
+# mtls_required_for_management_api = false
+# trusted_verification_report_endpoint = "https://security-center.example/trust"
+# audit_reporting_requires_security_admin = true
 "#
         .into()
     }

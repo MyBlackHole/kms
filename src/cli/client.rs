@@ -1,5 +1,10 @@
 use crate::cli::config::ServerConfig;
 use std::cell::RefCell;
+use std::path::PathBuf;
+use std::fs::{self, File};
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 pub struct KmsClient {
     client: reqwest::Client,
@@ -18,15 +23,72 @@ impl KmsClient {
         if cfg.accept_invalid_certs {
             builder = builder.danger_accept_invalid_certs(true);
         }
+        let server_url = cfg.server_url.trim_end_matches('/').to_string();
+
+        let credential = Self::load_credential(&server_url);
+
         Ok(Self {
             client: builder.build()?,
-            server_url: cfg.server_url.trim_end_matches('/').to_string(),
+            server_url,
             token: cfg.token.clone(),
             print_json: cfg.print_json,
             session_id: RefCell::new(None),
-            credential_json: RefCell::new(None),
+            credential_json: RefCell::new(credential),
             username: RefCell::new(None),
         })
+    }
+
+    /// 凭据文件路径：~/.kms/credentials.json
+    fn cred_path() -> Option<PathBuf> {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .ok()?;
+        Some(PathBuf::from(home).join(".kms").join("credentials.json"))
+    }
+
+    /// 从文件加载 credential（仅 server_url 匹配时使用）
+    fn load_credential(server_url: &str) -> Option<String> {
+        let path = Self::cred_path()?;
+        let content = fs::read_to_string(path).ok()?;
+        let data: serde_json::Value = serde_json::from_str(&content).ok()?;
+        let saved_url = data.get("server_url")?.as_str()?;
+        if saved_url == server_url {
+            data.get("credential")?.as_str().map(|s| s.to_string())
+        } else {
+            None
+        }
+    }
+
+    /// 持久化 credential 到文件（0600 权限）
+    fn save_credential(server_url: &str, username: &str, credential: &str) {
+        let path = match Self::cred_path() {
+            Some(p) => p,
+            None => return,
+        };
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let data = serde_json::json!({
+            "server_url": server_url,
+            "username": username,
+            "credential": credential,
+        });
+        if let Ok(json) = serde_json::to_string_pretty(&data) {
+            if let Ok(mut f) = File::create(&path) {
+                let _ = f.write_all(json.as_bytes());
+                #[cfg(unix)]
+                {
+                    let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+                }
+            }
+        }
+    }
+
+    /// 删除凭据文件
+    pub fn clear_credential_file() {
+        if let Some(path) = Self::cred_path() {
+            let _ = fs::remove_file(path);
+        }
     }
 
     /// 认证流程：x-Login → (可选) x-TotpVerify
@@ -104,6 +166,8 @@ impl KmsClient {
         }
 
         self.credential_json.replace(Some(credential.clone()));
+        let username = self.username.borrow().clone().unwrap_or_default();
+        Self::save_credential(&self.server_url, &username, &credential);
 
         println!("认证成功");
         Ok(serde_json::json!({
@@ -326,9 +390,10 @@ fn parse_kmip_response(resp: &serde_json::Value) -> crate::Result<serde_json::Va
         let reason = extract_result_reason(resp).unwrap_or_else(|| "OPERATION_FAILED".to_string());
         let message = extract_result_message(resp).unwrap_or_else(|| "KMIP 操作失败".to_string());
 
-        // 401 类错误提示登录
+        // 认证失败 → 清除本地凭据
         if reason == "AUTH_FAILED" {
-            eprintln!("提示: 需要先登录。运行 `kms-cli auth login <username>`");
+            KmsClient::clear_credential_file();
+            eprintln!("提示: 凭据已过期，需要重新登录。运行 `kms-cli auth login <username>`");
         }
 
         Err(crate::Error::ApiError(

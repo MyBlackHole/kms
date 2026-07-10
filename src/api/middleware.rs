@@ -1,8 +1,11 @@
 use crate::api::mtls::TlsIdentity;
+use crate::auth::reauth::{is_sensitive_action, ReauthManager};
 use crate::auth::session::SessionManager;
 use crate::auth::token::TokenStore;
+use crate::config::SecurityLevel;
 use crate::policy::engine::PolicyEngine;
-use crate::policy::label::SecurityLevel;
+use crate::policy::label::SecurityLabel;
+use crate::policy::label::SecurityLevel as MacLevel;
 use crate::policy::roles::AdminRole;
 use crate::policy::types::AuthContext;
 use axum::{
@@ -46,6 +49,11 @@ pub struct AuthMiddlewareState {
     pub session_manager: Arc<SessionManager>,
     pub token_store: Arc<TokenStore>,
     pub require_mtls: bool,
+    pub security_level: SecurityLevel,
+    /// 二次鉴权管理器（仅 level4 使用）
+    pub reauth_manager: Option<Arc<ReauthManager>>,
+    /// 敏感操作列表
+    pub sensitive_operations: Vec<String>,
 }
 
 const SKIP_AUTH_PREFIXES: &[&str] = &["/api/v1/health", "/kmip/"];
@@ -97,18 +105,114 @@ pub async fn auth_middleware(
         .headers()
         .get("X-Security-Level")
         .and_then(|v| v.to_str().ok())
-        .and_then(SecurityLevel::from_str)
-        .unwrap_or(SecurityLevel::Public);
+        .and_then(MacLevel::from_str)
+        .unwrap_or(MacLevel::Public);
 
     if mw_state.require_mtls && mtls_identity.is_none() {
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    // mTLS 连接优先使用证书指纹作为 subject；否则退回到默认系统主体。
+    // mTLS 连接优先使用证书指纹作为 subject
     let subject = mtls_identity
         .as_ref()
         .map(|id| id.subject.clone())
         .unwrap_or_else(|| "system".into());
+
+    // 会话管理
+    let session_id = request
+        .headers()
+        .get("X-Session-Id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    // 检查二次鉴权状态
+    let mut second_factor_verified = false;
+    let is_level4 = mw_state.security_level == SecurityLevel::Level4;
+
+    if is_level4 && !skip_auth {
+        // Level4: 检查敏感操作是否需要二次鉴权
+        if is_sensitive_action(&action, &mw_state.sensitive_operations) {
+            let reauth_code = request
+                .headers()
+                .get("X-Reauth-TOTP")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+
+            match reauth_code {
+                Some(code) if !code.is_empty() => {
+                    // 实际验证 TOTP 码值有效性，非空字符串不可绕过验证
+                    if let Some(ref sid) = session_id {
+                        let session = mw_state.session_manager.validate_session(sid);
+                        if let Some(session_info) = session {
+                            if let Some(ref totp_secret) = session_info.totp_secret {
+                                match crate::auth::totp::TotpManager::validate_user_code(
+                                    totp_secret,
+                                    &code,
+                                    "KMS",
+                                    &session_info.username,
+                                ) {
+                                    Ok(true) => {
+                                        second_factor_verified = true;
+                                        mw_state.session_manager.mark_second_factor(sid);
+                                    }
+                                    _ => return Err(StatusCode::UNAUTHORIZED),
+                                }
+                            } else {
+                                return Err(StatusCode::UNAUTHORIZED);
+                            }
+                        } else {
+                            return Err(StatusCode::UNAUTHORIZED);
+                        }
+                    } else {
+                        return Err(StatusCode::UNAUTHORIZED);
+                    }
+                }
+                _ => {
+                    // 检查 session 中是否有未过期的二次鉴权
+                    if let Some(ref sid) = session_id {
+                        if mw_state.session_manager.check_second_factor(sid) {
+                            second_factor_verified = true;
+                        } else {
+                            return Err(StatusCode::UNAUTHORIZED);
+                        }
+                    } else {
+                        return Err(StatusCode::UNAUTHORIZED);
+                    }
+                }
+            }
+        } else {
+            // 非敏感操作，标记二次鉴权为已通过（如果有有效 session）
+            if let Some(ref sid) = session_id {
+                if mw_state.session_manager.validate_session(sid).is_some() {
+                    second_factor_verified = true;
+                }
+            }
+        }
+    }
+
+    // TOTP 双因子验证
+    let needs_totp = !SKIP_TOTP_PREFIXES.iter().any(|p| path.starts_with(p));
+    if needs_totp && !skip_auth {
+        match session_id {
+            Some(ref sid) => {
+                let session = mw_state
+                    .session_manager
+                    .validate_session(sid)
+                    .ok_or(StatusCode::UNAUTHORIZED)?;
+                if !session.totp_verified {
+                    return Err(StatusCode::UNAUTHORIZED);
+                } else {
+                    mw_state.session_manager.mark_totp_verified(sid);
+                }
+            }
+            None => {
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+        }
+    }
+
+    // 构建完整的主体安全标记
+    let subject_label = SecurityLabel::new(security_level);
 
     let ctx = AuthContext {
         subject,
@@ -120,38 +224,14 @@ pub async fn auth_middleware(
         action: action.clone(),
         resource: path.clone(),
         request_time: chrono::Utc::now(),
+        session_id: session_id.clone(),
+        second_factor_verified,
+        mtls_authenticated: mtls_identity.is_some(),
+        subject_label: Some(subject_label),
     };
 
     if !mw_state.policy.evaluate(&ctx).unwrap_or(false) {
         return Err(StatusCode::FORBIDDEN);
-    }
-
-    // TOTP 双因子验证（跳过健康检查和 KMIP 路径）
-    let needs_totp = !SKIP_TOTP_PREFIXES.iter().any(|p| path.starts_with(p));
-    if needs_totp {
-        let session_id = request
-            .headers()
-            .get("X-Session-Id")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-
-        match session_id {
-            Some(ref sid) => {
-                let session = mw_state
-                    .session_manager
-                    .validate_session(sid)
-                    .ok_or(StatusCode::UNAUTHORIZED)?;
-                if !session.totp_verified {
-                    return Err(StatusCode::UNAUTHORIZED);
-                } else {
-                    // 刷新会话时间
-                    mw_state.session_manager.mark_totp_verified(sid);
-                }
-            }
-            None => {
-                return Err(StatusCode::UNAUTHORIZED);
-            }
-        }
     }
 
     request.extensions_mut().insert(ctx);

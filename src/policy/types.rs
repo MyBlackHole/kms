@@ -53,6 +53,15 @@ pub struct AuthContext {
     pub action: String,
     pub resource: String,
     pub request_time: chrono::DateTime<chrono::Utc>,
+    // 等保四级增强字段
+    /// 会话 ID（用于会话管理和二次鉴权状态跟踪）
+    pub session_id: Option<String>,
+    /// 二次鉴权是否已完成
+    pub second_factor_verified: bool,
+    /// 是否来自 mTLS 连接
+    pub mtls_authenticated: bool,
+    /// 主体安全标记（用于 MAC 全覆盖校验）
+    pub subject_label: Option<crate::policy::label::SecurityLabel>,
 }
 
 impl AuthContext {
@@ -68,6 +77,10 @@ impl AuthContext {
             action: action.to_string(),
             resource: resource.to_string(),
             request_time: chrono::Utc::now(),
+            session_id: None,
+            second_factor_verified: false,
+            mtls_authenticated: false,
+            subject_label: None,
         }
     }
 }
