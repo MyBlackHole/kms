@@ -83,8 +83,8 @@ pub enum AuthAction {
         username: String,
     },
     Logout {
-        #[arg(long)]
-        session: String,
+        #[arg(long, help = "会话 ID（可选，有凭据文件时自动读取）")]
+        session: Option<String>,
     },
     Recovery {
         code: String,

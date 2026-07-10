@@ -59,8 +59,8 @@ impl KmsClient {
         }
     }
 
-    /// 持久化 credential 到文件（0600 权限）
-    fn save_credential(server_url: &str, username: &str, credential: &str) {
+    /// 保存 session 信息（login 后，totp-verify 前）
+    fn save_session_info(server_url: &str, username: &str, session_id: &str) {
         let path = match Self::cred_path() {
             Some(p) => p,
             None => return,
@@ -71,6 +71,44 @@ impl KmsClient {
         let data = serde_json::json!({
             "server_url": server_url,
             "username": username,
+            "session_id": session_id,
+        });
+        if let Ok(json) = serde_json::to_string_pretty(&data) {
+            if let Ok(mut f) = File::create(&path) {
+                let _ = f.write_all(json.as_bytes());
+                #[cfg(unix)]
+                {
+                    let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+                }
+            }
+        }
+    }
+
+    /// 从已保存的文件中读取 username（用于 totp-verify 在不同 CLI 进程间传递 username）
+    fn load_username_from_session(server_url: &str) -> Option<String> {
+        let path = Self::cred_path()?;
+        let content = fs::read_to_string(path).ok()?;
+        let data: serde_json::Value = serde_json::from_str(&content).ok()?;
+        if data.get("server_url")?.as_str()? == server_url {
+            data.get("username")?.as_str().map(|s| s.to_string())
+        } else {
+            None
+        }
+    }
+
+    /// 持久化 credential 到文件（0600 权限），同时保存 session_id 供 logout 使用
+    fn save_credential(server_url: &str, username: &str, credential: &str, session_id: &str) {
+        let path = match Self::cred_path() {
+            Some(p) => p,
+            None => return,
+        };
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let data = serde_json::json!({
+            "server_url": server_url,
+            "username": username,
+            "session_id": session_id,
             "credential": credential,
         });
         if let Ok(json) = serde_json::to_string_pretty(&data) {
@@ -84,11 +122,27 @@ impl KmsClient {
         }
     }
 
+    /// 从凭据文件读取 session_id（供 logout 使用）
+    pub fn load_session_id(server_url: &str) -> Option<String> {
+        let path = Self::cred_path()?;
+        let content = fs::read_to_string(path).ok()?;
+        let data: serde_json::Value = serde_json::from_str(&content).ok()?;
+        if data.get("server_url")?.as_str()? == server_url {
+            data.get("session_id")?.as_str().map(|s| s.to_string())
+        } else {
+            None
+        }
+    }
+
     /// 删除凭据文件
     pub fn clear_credential_file() {
         if let Some(path) = Self::cred_path() {
             let _ = fs::remove_file(path);
         }
+    }
+
+    pub fn server_url(&self) -> &str {
+        &self.server_url
     }
 
     /// 认证流程：x-Login → (可选) x-TotpVerify
@@ -114,6 +168,8 @@ impl KmsClient {
 
         self.session_id.replace(Some(session_id.clone()));
         self.username.replace(Some(username.to_string()));
+        // 保存 session 信息到文件（让后续 totp-verify 能拿到 username）
+        Self::save_session_info(&self.server_url, username, &session_id);
 
         // 提取 totp_uri（如果有）
         let totp_uri = find_value_tag(batch, "ServerURI")
@@ -166,8 +222,11 @@ impl KmsClient {
         }
 
         self.credential_json.replace(Some(credential.clone()));
-        let username = self.username.borrow().clone().unwrap_or_default();
-        Self::save_credential(&self.server_url, &username, &credential);
+        let mut username = self.username.borrow().clone().unwrap_or_default();
+        if username.is_empty() {
+            username = Self::load_username_from_session(&self.server_url).unwrap_or_default();
+        }
+        Self::save_credential(&self.server_url, &username, &credential, session_id);
 
         println!("认证成功");
         Ok(serde_json::json!({

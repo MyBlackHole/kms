@@ -19,7 +19,15 @@ pub async fn handle(
             Ok(None)
         }
         AuthAction::Logout { session } => {
-            handle_logout(client, session).await?;
+            let sid = session.clone().unwrap_or_else(|| {
+                KmsClient::load_session_id(&client.server_url())
+                    .unwrap_or_default()
+            });
+            if sid.is_empty() {
+                eprintln!("错误: 未提供 session ID，也没有已保存的凭据");
+                std::process::exit(1);
+            }
+            handle_logout(client, &sid).await?;
             Ok(None)
         }
         AuthAction::Recovery { code, session } => {
